@@ -21,8 +21,12 @@
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 static const char *TAG = "lwext4_vfs";
+
+#define VFS_PATH_BUF_SZ 320
+#define MAX_SYMLINK_DEPTH 8
 
 /* -------------------------------------------------------------------------
  * Open-file table
@@ -62,29 +66,162 @@ static void free_fd(int fd)
 
 static char s_mount_point[64] = {0};
 
-/* Convert a VFS-relative path (without the mount-point prefix) to a full
- * path expected by lwext4, e.g. "/ext4/foo.txt".
- * For directory operations, use full_dir_path() which appends a trailing '/'. */
-static const char *full_path(const char *rel)
+static void build_full_path(char *dst, size_t dst_sz, const char *rel)
 {
-    /* VFS strips the mount prefix, so rel starts with '/'.  lwext4 needs the
-     * full absolute path including the mount point. */
-    static char buf[320];
-    snprintf(buf, sizeof(buf), "%s%s", s_mount_point, rel);
-    return buf;
+    snprintf(dst, dst_sz, "%s%s", s_mount_point, rel);
 }
 
-/* Like full_path() but ensures a trailing '/' — required by lwext4 for
- * directory operations (ext4_dir_open, ext4_dir_mk, ext4_dir_rm). */
-static const char *full_dir_path(const char *rel)
+static void build_full_dir_path(char *dst, size_t dst_sz, const char *rel)
 {
-    static char buf[322];
-    int len = snprintf(buf, sizeof(buf) - 2, "%s%s", s_mount_point, rel);
-    if (len > 0 && buf[len - 1] != '/') {
-        buf[len]     = '/';
-        buf[len + 1] = '\0';
+    int len = snprintf(dst, dst_sz, "%s%s", s_mount_point, rel);
+    if (len > 0 && (size_t)len < dst_sz - 1 && dst[len - 1] != '/') {
+        dst[len]     = '/';
+        dst[len + 1] = '\0';
     }
-    return buf;
+}
+
+/*
+ * resolve_symlink_path — resolve symlinks component by component.
+ *
+ * ext4_mode_get() does not recognise the mount point itself ("/emmc"), so
+ * we initialise 'resolved' to the mount-point string and start processing
+ * 'remaining' from the path after the mount point.  This avoids passing
+ * the "/emmc" component to ext4_mode_get and allows intermediate symlinks
+ * to be followed correctly.
+ *
+ * Example: /emmc/link_dir/file.txt where link_dir is a symlink
+ *          → resolves to /emmc/real_dir/file.txt
+ */
+static int resolve_symlink_path(const char *in_path, char *out_path, size_t out_sz)
+{
+    char resolved[VFS_PATH_BUF_SZ];
+    char remaining[VFS_PATH_BUF_SZ];
+
+    /* Skip the mount-point prefix so ext4_mode_get never sees it.
+     * Initialise resolved = s_mount_point; remaining = path after the prefix. */
+    size_t mp_len = strlen(s_mount_point);
+    if (mp_len > 0
+        && strncmp(in_path, s_mount_point, mp_len) == 0
+        && (in_path[mp_len] == '/' || in_path[mp_len] == '\0')) {
+        strncpy(resolved, s_mount_point, sizeof(resolved) - 1);
+        resolved[sizeof(resolved) - 1] = '\0';
+        strncpy(remaining, in_path + mp_len, sizeof(remaining) - 1);
+        remaining[sizeof(remaining) - 1] = '\0';
+    } else {
+        /* No mount-point prefix — seed resolved with the leading '/'. */
+        if (in_path[0] == '/') {
+            resolved[0] = '/';
+            resolved[1] = '\0';
+        } else {
+            resolved[0] = '\0';
+        }
+        strncpy(remaining, in_path, sizeof(remaining) - 1);
+        remaining[sizeof(remaining) - 1] = '\0';
+    }
+
+    int total_symlinks = 0;
+
+    while (1) {
+        /* Skip leading slashes in remaining. */
+        char *p = remaining;
+        while (*p == '/') p++;
+        if (*p == '\0') break; /* all components processed */
+
+        /* Extract the next path component. */
+        char *slash = strchr(p, '/');
+        char component[256];
+        char rest[VFS_PATH_BUF_SZ];
+
+        if (slash) {
+            size_t clen = (size_t)(slash - p);
+            if (clen >= sizeof(component)) clen = sizeof(component) - 1;
+            memcpy(component, p, clen);
+            component[clen] = '\0';
+            strncpy(rest, slash, sizeof(rest) - 1);
+            rest[sizeof(rest) - 1] = '\0';
+        } else {
+            strncpy(component, p, sizeof(component) - 1);
+            component[sizeof(component) - 1] = '\0';
+            rest[0] = '\0';
+        }
+
+        /* Build the candidate path: resolved + component. */
+        char candidate[VFS_PATH_BUF_SZ];
+        size_t rlen = strlen(resolved);
+        if (rlen > 0 && resolved[rlen - 1] == '/') {
+            snprintf(candidate, sizeof(candidate), "%s%s", resolved, component);
+        } else if (rlen == 0) {
+            snprintf(candidate, sizeof(candidate), "%s", component);
+        } else {
+            snprintf(candidate, sizeof(candidate), "%s/%s", resolved, component);
+        }
+
+        /* Check the type of this component. */
+        uint32_t mode = 0;
+        int rc = ext4_mode_get(candidate, &mode);
+        if (rc != EOK) {
+            /* Path does not exist yet (e.g. new file creation) —
+             * append the remainder and return EOK so the caller can
+             * report the real error from ext4_fopen / ext4_dir_open. */
+            if (rest[0]) {
+                snprintf(out_path, out_sz, "%s%s", candidate, rest);
+            } else {
+                strncpy(out_path, candidate, out_sz - 1);
+                out_path[out_sz - 1] = '\0';
+            }
+            return EOK;
+        }
+
+        if ((mode & S_IFMT) == S_IFLNK) {
+            if (++total_symlinks >= MAX_SYMLINK_DEPTH) return ELOOP;
+
+            /* Read the symlink target. */
+            char target[VFS_PATH_BUF_SZ];
+            size_t rcnt = 0;
+            rc = ext4_readlink(candidate, target, sizeof(target) - 1, &rcnt);
+            if (rc != EOK) return rc;
+            target[rcnt] = '\0';
+
+            char new_remaining[VFS_PATH_BUF_SZ];
+            snprintf(new_remaining, sizeof(new_remaining), "%s%s", target, rest);
+
+            if (target[0] == '/') {
+                /* Absolute symlink: reset resolved.
+                 * If the target is inside the mount point, reset resolved to
+                 * the mount-point string and strip the prefix from remaining
+                 * so ext4_mode_get never sees it.  Otherwise reset to '/'. */
+                if (mp_len > 0
+                    && strncmp(target, s_mount_point, mp_len) == 0
+                    && (target[mp_len] == '/' || target[mp_len] == '\0')) {
+                    strncpy(resolved, s_mount_point, sizeof(resolved) - 1);
+                    resolved[sizeof(resolved) - 1] = '\0';
+                    char adjusted[VFS_PATH_BUF_SZ];
+                    snprintf(adjusted, sizeof(adjusted), "%s%s", target + mp_len, rest);
+                    strncpy(new_remaining, adjusted, sizeof(new_remaining) - 1);
+                    new_remaining[sizeof(new_remaining) - 1] = '\0';
+                } else {
+                    resolved[0] = '/';
+                    resolved[1] = '\0';
+                }
+            }
+            /* Relative symlink: keep resolved (parent directory of the link). */
+
+            strncpy(remaining, new_remaining, sizeof(remaining) - 1);
+            remaining[sizeof(remaining) - 1] = '\0';
+            continue;
+        }
+
+        /* Not a symlink — advance resolved and move to the next component. */
+        strncpy(resolved, candidate, sizeof(resolved) - 1);
+        resolved[sizeof(resolved) - 1] = '\0';
+
+        strncpy(remaining, rest, sizeof(remaining) - 1);
+        remaining[sizeof(remaining) - 1] = '\0';
+    }
+
+    strncpy(out_path, resolved, out_sz - 1);
+    out_path[out_sz - 1] = '\0';
+    return EOK;
 }
 
 /* -------------------------------------------------------------------------
@@ -110,14 +247,25 @@ static int vfs_open(const char *path, int flags, int mode)
         return -1;
     }
 
-    int rc = ext4_fopen(&s_fds[fd].fh, full_path(path), ext4_flags);
+    char raw_path[VFS_PATH_BUF_SZ];
+    char real_path[VFS_PATH_BUF_SZ];
+    build_full_path(raw_path, sizeof(raw_path), path);
+
+    int rc = resolve_symlink_path(raw_path, real_path, sizeof(real_path));
     if (rc != EOK) {
         free_fd(fd);
         errno = rc;
         return -1;
     }
 
-    strncpy(s_fds[fd].path, full_path(path), sizeof(s_fds[fd].path) - 1);
+    rc = ext4_fopen(&s_fds[fd].fh, real_path, ext4_flags);
+    if (rc != EOK) {
+        free_fd(fd);
+        errno = rc;
+        return -1;
+    }
+
+    strncpy(s_fds[fd].path, real_path, sizeof(s_fds[fd].path) - 1);
     return fd;
 }
 
@@ -192,39 +340,55 @@ static int vfs_stat(const char *path, struct stat *st)
 {
     memset(st, 0, sizeof(*st));
 
-    /* Try opening as a regular file first */
-    ext4_file f;
-    int rc = ext4_fopen(&f, full_path(path), "r");
-    if (rc == EOK) {
+    char raw_path[VFS_PATH_BUF_SZ];
+    char real_path[VFS_PATH_BUF_SZ];
+    build_full_path(raw_path, sizeof(raw_path), path);
+
+    int rc = resolve_symlink_path(raw_path, real_path, sizeof(real_path));
+    if (rc != EOK) {
+        errno = rc;
+        return -1;
+    }
+
+    uint32_t mode = 0;
+    rc = ext4_mode_get(real_path, &mode);
+    if (rc != EOK) {
+        errno = rc;
+        return -1;
+    }
+
+    st->st_mode = (mode_t)mode;
+
+    if ((st->st_mode & S_IFMT) == S_IFREG) {
+        ext4_file f;
+        rc = ext4_fopen(&f, real_path, "r");
+        if (rc != EOK) {
+            errno = rc;
+            return -1;
+        }
         st->st_size = (off_t)ext4_fsize(&f);
-        st->st_mode = S_IFREG | 0644;
         ext4_fclose(&f);
-        return 0;
     }
 
-    /* Fall back to checking as a directory — lwext4 needs trailing '/' */
-    ext4_dir d;
-    rc = ext4_dir_open(&d, full_dir_path(path));
-    if (rc == EOK) {
-        st->st_mode = S_IFDIR | 0755;
-        ext4_dir_close(&d);
-        return 0;
-    }
-
-    errno = ENOENT;
-    return -1;
+    return 0;
 }
 
 static int vfs_unlink(const char *path)
 {
-    int rc = ext4_fremove(full_path(path));
+    char full[VFS_PATH_BUF_SZ];
+    build_full_path(full, sizeof(full), path);
+    int rc = ext4_fremove(full);
     if (rc != EOK) { errno = rc; return -1; }
     return 0;
 }
 
 static int vfs_rename(const char *src, const char *dst)
 {
-    int rc = ext4_frename(full_path(src), full_path(dst));
+    char full_src[VFS_PATH_BUF_SZ];
+    char full_dst[VFS_PATH_BUF_SZ];
+    build_full_path(full_src, sizeof(full_src), src);
+    build_full_path(full_dst, sizeof(full_dst), dst);
+    int rc = ext4_frename(full_src, full_dst);
     if (rc != EOK) { errno = rc; return -1; }
     return 0;
 }
@@ -232,14 +396,18 @@ static int vfs_rename(const char *src, const char *dst)
 static int vfs_mkdir(const char *path, mode_t mode)
 {
     (void)mode;
-    int rc = ext4_dir_mk(full_dir_path(path));
+    char full[VFS_PATH_BUF_SZ];
+    build_full_dir_path(full, sizeof(full), path);
+    int rc = ext4_dir_mk(full);
     if (rc != EOK) { errno = rc; return -1; }
     return 0;
 }
 
 static int vfs_rmdir(const char *path)
 {
-    int rc = ext4_dir_rm(full_dir_path(path));
+    char full[VFS_PATH_BUF_SZ];
+    build_full_dir_path(full, sizeof(full), path);
+    int rc = ext4_dir_rm(full);
     if (rc != EOK) { errno = rc; return -1; }
     return 0;
 }
@@ -273,10 +441,25 @@ static DIR *vfs_opendir(const char *path)
         errno = ENFILE;
         return NULL;
     }
-    const char *dp = full_dir_path(path);
-    int rc = ext4_dir_open(&s_dirs[i].dir, dp);
+    char raw_path[VFS_PATH_BUF_SZ];
+    char real_path[VFS_PATH_BUF_SZ];
+    build_full_path(raw_path, sizeof(raw_path), path);
+
+    int rc = resolve_symlink_path(raw_path, real_path, sizeof(real_path));
     if (rc != EOK) {
-        ESP_LOGE(TAG, "ext4_dir_open('%s') failed: %d", dp, rc);
+        errno = rc;
+        return NULL;
+    }
+
+    size_t rlen = strlen(real_path);
+    if (rlen > 0 && real_path[rlen - 1] != '/' && rlen < sizeof(real_path) - 1) {
+        real_path[rlen] = '/';
+        real_path[rlen + 1] = '\0';
+    }
+
+    rc = ext4_dir_open(&s_dirs[i].dir, real_path);
+    if (rc != EOK) {
+        ESP_LOGE(TAG, "ext4_dir_open('%s') failed: %d", real_path, rc);
         errno = rc;
         return NULL;
     }
@@ -301,7 +484,17 @@ static struct dirent *vfs_readdir(DIR *pdir)
                  ? de->name_length : (uint8_t)(sizeof(ent.d_name) - 1);
     memcpy(ent.d_name, de->name, nlen);
     ent.d_name[nlen] = '\0';
-    ent.d_type = (de->inode_type == EXT4_DE_DIR) ? DT_DIR : DT_REG;
+    switch (de->inode_type) {
+        case EXT4_DE_DIR:
+            ent.d_type = DT_DIR;
+            break;
+        case EXT4_DE_SYMLINK:
+            ent.d_type = DT_LNK;
+            break;
+        default:
+            ent.d_type = DT_REG;
+            break;
+    }
     return &ent;
 }
 

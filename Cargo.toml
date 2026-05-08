@@ -1,6 +1,6 @@
 [package]
 name = "emmc-fs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "FAT and EXT4 filesystem abstraction for ESP32 eMMC/SD cards via ESP-IDF"
 repository = "https://github.com/hnz1102/emmc-fs.git"

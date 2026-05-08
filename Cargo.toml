@@ -1,0 +1,25 @@
+[package]
+name = "emmc-fs"
+version = "0.1.0"
+edition = "2021"
+description = "FAT and EXT4 filesystem abstraction for ESP32 eMMC/SD cards via ESP-IDF"
+repository = "https://github.com/hnz1102/emmc-fs.git"
+license = "MIT"
+readme = "README.md"
+keywords = ["embedded", "emmc", "filesystem", "esp32", "esp-idf"]
+categories = ["embedded", "hardware-support", "filesystem"]
+authors = ["Hiroshi Nakajima"]
+
+[features]
+default = ["fat"]
+fat = []
+ext4 = []
+
+[dependencies]
+esp-idf-sys = "0.36"
+log = "0.4"
+anyhow = "1.0"
+
+[build-dependencies]
+embuild = { version = "0.33", features = ["espidf"] }
+anyhow = "1.0"

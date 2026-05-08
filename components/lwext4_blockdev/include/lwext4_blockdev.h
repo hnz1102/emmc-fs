@@ -113,6 +113,18 @@ esp_err_t lwext4_vfs_register(const char *mount_point);
  */
 esp_err_t lwext4_vfs_unregister(const char *mount_point);
 
+/**
+ * @brief Recursively remove a directory and all its contents.
+ *
+ * Calls ext4_dir_rm() on the given full VFS path (e.g. "/emmc/mydir").
+ * ext4_dir_rm() handles the recursion internally at the ext4 level,
+ * so callers must NOT remove child entries beforehand.
+ *
+ * @param path  Full VFS path of the directory to remove.
+ * @return 0 on success, or a positive errno value on failure.
+ */
+int lwext4_rmdir_recursive(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

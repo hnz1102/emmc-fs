@@ -406,9 +406,18 @@ static int vfs_mkdir(const char *path, mode_t mode)
 static int vfs_rmdir(const char *path)
 {
     char full[VFS_PATH_BUF_SZ];
-    build_full_dir_path(full, sizeof(full), path);
+    /* ext4_dir_rm() computes name_off via ext4_generic_open(), which advances
+     * past every '/' separator.  A trailing slash causes name_off to overshoot
+     * the directory name, leaving path="/" and len=0 for the final ext4_unlink
+     * call — resulting in ENOENT.  Use build_full_path (no trailing slash). */
+    build_full_path(full, sizeof(full), path);
+    ESP_LOGI(TAG, "ext4_dir_rm('%s')", full);
     int rc = ext4_dir_rm(full);
-    if (rc != EOK) { errno = rc; return -1; }
+    if (rc != EOK) {
+        ESP_LOGE(TAG, "ext4_dir_rm('%s') failed: rc=%d errno=%d", full, rc, errno);
+        errno = rc;
+        return -1;
+    }
     return 0;
 }
 
@@ -472,11 +481,16 @@ static struct dirent *vfs_readdir(DIR *pdir)
     vfs_dir_entry_t *d = (vfs_dir_entry_t *)pdir;
     const ext4_direntry *de;
 
-    /* Skip deleted (inode=0) entries */
+    /* Skip deleted (inode=0) entries and the '.' / '..' pseudo-entries. */
     do {
         de = ext4_dir_entry_next(&d->dir);
         if (de == NULL) return NULL;
-    } while (de->inode == 0);
+        if (de->inode == 0) continue;
+        /* Skip '.' and '..' */
+        if (de->name_length == 1 && de->name[0] == '.') continue;
+        if (de->name_length == 2 && de->name[0] == '.' && de->name[1] == '.') continue;
+        break;
+    } while (1);
 
     static struct dirent ent;
     memset(&ent, 0, sizeof(ent));
@@ -559,5 +573,25 @@ esp_err_t lwext4_vfs_unregister(const char *mount_point)
 {
     esp_err_t rc = esp_vfs_unregister(mount_point);
     s_mount_point[0] = '\0';
+    return rc;
+}
+
+int lwext4_rmdir_recursive(const char *path)
+{
+    /* ext4_dir_rm() must receive the path WITHOUT a trailing slash.
+     * A trailing slash causes name_off to overshoot the directory name,
+     * making the final ext4_unlink call use len=0 → ENOENT. */
+    char full[VFS_PATH_BUF_SZ];
+    size_t len = strnlen(path, sizeof(full) - 1);
+    while (len > 1 && path[len - 1] == '/') {
+        len--;
+    }
+    memcpy(full, path, len);
+    full[len] = '\0';
+
+    int rc = ext4_dir_rm(full);
+    if (rc != EOK) {
+        ESP_LOGE(TAG, "lwext4_rmdir_recursive('%s') failed: rc=%d", full, rc);
+    }
     return rc;
 }

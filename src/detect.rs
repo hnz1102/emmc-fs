@@ -87,6 +87,16 @@ const GPT_EFI_SYSTEM_GUID: [u8; 16] = [
     0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B, // 00A0C93EC93B (BE)
 ];
 
+/// Type GUID for Microsoft Basic Data partition (FAT32/NTFS/exFAT).
+/// UUID: EBD0A0A2-B9E5-4433-87C0-68B6B72699C7
+const GPT_MS_BASIC_DATA_GUID: [u8; 16] = [
+    0xA2, 0xA0, 0xD0, 0xEB,  // EBD0A0A2 (LE)
+    0xE5, 0xB9,              // B9E5 (LE)
+    0x33, 0x44,              // 4433 (LE)
+    0x87, 0xC0,              // 87C0 (BE)
+    0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7, // 68B6B72699C7 (BE)
+];
+
 /// Scan the GPT partition table and return all recognised partitions.
 /// Linux data partitions (type GUID 0FC63DAF-…) are mapped to `part_type = 0x83`.
 /// Other non-empty entries are included with `part_type = 0xFF`.
@@ -173,7 +183,21 @@ pub unsafe fn scan_gpt(card: *mut sdmmc_card_t) -> Vec<PartitionInfo> {
                 0x83 // Linux ext2/3/4
             } else if buf[off..off+16] == GPT_EFI_SYSTEM_GUID {
                 0xEF // EFI System Partition (FAT32)
+            } else if buf[off..off+16] == GPT_MS_BASIC_DATA_GUID {
+                0x0C // Microsoft Basic Data → FAT32 (LBA)
             } else {
+                // Log the raw GUID bytes so unrecognised partitions can be
+                // identified and added to the match list.
+                let g = &buf[off..off+16];
+                log::warn!(
+                    "[GPT] unrecognised type GUID: \
+                     {:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-\
+                     {:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+                    g[3], g[2], g[1], g[0],
+                    g[5], g[4], g[7], g[6],
+                    g[8], g[9],
+                    g[10], g[11], g[12], g[13], g[14], g[15]
+                );
                 0xFF // Other GPT partition
             };
 

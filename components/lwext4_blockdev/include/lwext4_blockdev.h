@@ -95,6 +95,44 @@ esp_err_t lwext4_format(const char *label);
  */
 void lwext4_sdmmc_card_deinit(const sdmmc_host_t *host, sdmmc_card_t *card);
 
+/* =========================================================================
+ * FAT partition mount (GPT / non-zero LBA offset)
+ * =========================================================================
+ *
+ * esp_vfs_fat_sdmmc_mount() relies on FATFS finding a FAT entry in the MBR
+ * at sector 0.  On GPT disks sector 0 is the protective MBR (type 0xEE)
+ * which FATFS cannot mount.  The functions below register a custom FATFS
+ * diskio driver that adds lba_start to every sector address so that the
+ * partition VBR appears at logical sector 0.
+ */
+
+/**
+ * @brief Mount a FAT partition that starts at a non-zero LBA on the device.
+ *
+ * Initialises the SDMMC card, registers a custom diskio driver that offsets
+ * all sector I/O by lba_start, then mounts the FAT volume and registers it
+ * with the ESP-IDF VFS.
+ *
+ * @param host         SDMMC host descriptor.
+ * @param slot_config  Slot pin / width configuration.
+ * @param mount_point  VFS path (e.g. "/emmc").
+ * @param lba_start    First sector of the partition on the physical device.
+ * @return ESP_OK on success.
+ */
+esp_err_t fat_partition_mount(
+    const sdmmc_host_t *host,
+    const void         *slot_config,
+    const char         *mount_point,
+    uint64_t            lba_start);
+
+/**
+ * @brief Unmount the FAT partition previously mounted by fat_partition_mount.
+ *
+ * @param mount_point  Must match the path passed to fat_partition_mount().
+ * @return ESP_OK on success.
+ */
+esp_err_t fat_partition_umount(const char *mount_point);
+
 /**
  * @brief Register the EXT4 filesystem with the ESP-IDF VFS.
  *

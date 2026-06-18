@@ -73,6 +73,7 @@ idf_component_register(
     SRCS
         "lwext4_blockdev.c"
         "lwext4_vfs.c"
+        "fat_partition.c"
         ${LWEXT4_SRCS}
     INCLUDE_DIRS
         "include"
@@ -81,6 +82,7 @@ idf_component_register(
         sdmmc
         esp_driver_sdmmc
         vfs
+        fatfs
         esp_common
         log
 )

@@ -77,6 +77,16 @@ const GPT_LINUX_DATA_GUID: [u8; 16] = [
     0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4, // 3D69D8477DE4 (BE)
 ];
 
+/// Type GUID for EFI System Partition (FAT32 contents) in mixed-endian format.
+/// UUID: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+const GPT_EFI_SYSTEM_GUID: [u8; 16] = [
+    0x28, 0x73, 0x2A, 0xC1,  // C12A7328 (LE)
+    0x1F, 0xF8,              // F81F (LE)
+    0xD2, 0x11,              // 11D2 (LE)
+    0xBA, 0x4B,              // BA4B (BE)
+    0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B, // 00A0C93EC93B (BE)
+];
+
 /// Scan the GPT partition table and return all recognised partitions.
 /// Linux data partitions (type GUID 0FC63DAF-…) are mapped to `part_type = 0x83`.
 /// Other non-empty entries are included with `part_type = 0xFF`.
@@ -161,6 +171,8 @@ pub unsafe fn scan_gpt(card: *mut sdmmc_card_t) -> Vec<PartitionInfo> {
 
             let part_type: u8 = if buf[off..off+16] == GPT_LINUX_DATA_GUID {
                 0x83 // Linux ext2/3/4
+            } else if buf[off..off+16] == GPT_EFI_SYSTEM_GUID {
+                0xEF // EFI System Partition (FAT32)
             } else {
                 0xFF // Other GPT partition
             };

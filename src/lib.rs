@@ -67,7 +67,8 @@ impl PartitionInfo {
     pub fn is_fat(&self) -> bool {
         matches!(self.part_type,
             0x01 | 0x04 | 0x06 | 0x0B | 0x0C | 0x0E | 0x0F |
-            0x11 | 0x14 | 0x16 | 0x1B | 0x1C | 0x1E)
+            0x11 | 0x14 | 0x16 | 0x1B | 0x1C | 0x1E |
+            0xEF) // EFI System Partition (FAT32 contents)
     }
 
     /// Returns true if this is a Linux filesystem (ext2/3/4) partition.

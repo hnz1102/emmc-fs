@@ -1,0 +1,4 @@
+/components/lwext4_blockdev/lwext4/
+/components/lwext4_blockdev/lwext4/.patches_applied
+/target/
+/Cargo.lock

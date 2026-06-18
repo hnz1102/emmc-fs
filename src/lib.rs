@@ -46,6 +46,9 @@ pub use detect::detect;
 /// Re-export MBR scanner.
 pub use detect::scan_mbr;
 
+/// Re-export combined MBR/GPT partition scanner.
+pub use detect::scan_partitions;
+
 /// Information about a single MBR partition entry.
 #[derive(Clone, Debug)]
 pub struct PartitionInfo {

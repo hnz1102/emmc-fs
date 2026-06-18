@@ -175,6 +175,81 @@ impl Ext4Mount {
         })
     }
 
+    /// Mount the eMMC/SD card as EXT4, automatically scanning the MBR to
+    /// find the correct partition offset.
+    ///
+    /// This is the preferred entry point when the disk may have an MBR
+    /// partition table (i.e. the EXT4 filesystem does not start at sector 0).
+    /// It initialises the card once, reads the MBR, and — if a Linux (type
+    /// 0x83) partition is found — restricts the block-device window to that
+    /// partition before mounting.  When no MBR entry is present the mount
+    /// falls back to raw-device mode (sector 0).
+    ///
+    /// Returns the mounted filesystem together with the full MBR partition
+    /// list so the caller can cache it without a second scan.
+    ///
+    /// # Safety
+    /// Same requirements as [`mount`][Self::mount].
+    pub unsafe fn mount_with_mbr_scan(
+        host: &sdmmc_host_t,
+        slot_config: &sdmmc_slot_config_t,
+        mount_point: &str,
+    ) -> Result<(Self, Vec<crate::PartitionInfo>), EmmcError> {
+        let mp = CString::new(mount_point).map_err(|_| EmmcError::BadMountPoint)?;
+
+        let mut card: *mut sdmmc_card_t = core::ptr::null_mut();
+        let rc = lwext4_sdmmc_card_init(
+            host as *const _,
+            slot_config as *const _ as *const c_void,
+            &mut card,
+        );
+        if rc != ESP_OK as i32 {
+            return Err(EmmcError::EspError(rc));
+        }
+
+        // Scan partition table (MBR or GPT) before blockdev registration.
+        // scan_partitions falls back to GPT automatically when the MBR holds
+        // only a protective 0xEE entry (common on Linux-formatted eMMC).
+        let partitions = crate::detect::scan_partitions(card);
+        log::info!("[EXT4] partition scan: {} entr(ies) found", partitions.len());
+        for (i, p) in partitions.iter().enumerate() {
+            log::info!("[EXT4]   [{i}] type=0x{:02X} lba_start={} sectors={}",
+                p.part_type, p.lba_start, p.sector_count);
+        }
+        let ext_part = partitions.iter().find(|p| p.is_ext()).cloned();
+        if ext_part.is_none() {
+            log::warn!("[EXT4] no Linux (0x83) partition found; will attempt raw-device mount");
+        }
+
+        let rc = lwext4_blockdev_init(card);
+        if rc != ESP_OK as i32 {
+            lwext4_sdmmc_card_deinit(host as *const _, card);
+            return Err(EmmcError::EspError(rc));
+        }
+
+        // Restrict the block-device window to the EXT4 partition when found.
+        if let Some(ref p) = ext_part {
+            let rc = lwext4_blockdev_set_partition(p.lba_start as u64, p.sector_count as u64);
+            if rc != ESP_OK as i32 {
+                lwext4_blockdev_deinit();
+                lwext4_sdmmc_card_deinit(host as *const _, card);
+                return Err(EmmcError::EspError(rc));
+            }
+        }
+
+        let rc = lwext4_mount(mp.as_ptr() as *const u8);
+        if rc != 0 {
+            lwext4_blockdev_deinit();
+            lwext4_sdmmc_card_deinit(host as *const _, card);
+            return Err(EmmcError::EspError(rc));
+        }
+
+        Ok((
+            Ext4Mount { card, host_snapshot: *host, mount_point: mp },
+            partitions,
+        ))
+    }
+
     /// Format the block device as EXT4, then mount it.
     ///
     /// Use this when the card does not yet have an EXT4 filesystem, or when

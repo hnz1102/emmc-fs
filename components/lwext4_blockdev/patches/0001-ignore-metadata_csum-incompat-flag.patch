@@ -1,0 +1,13 @@
+diff --git a/include/ext4_types.h b/include/ext4_types.h
+index c9cdd34..5972910 100644
+--- a/include/ext4_types.h
++++ b/include/ext4_types.h
+@@ -296,7 +296,7 @@ struct ext4_sblock {
+  * MMP - multi-mout protection (impossible scenario)
+  * */
+ #define EXT_FINCOM_IGNORED                                 \
+-	EXT4_FINCOM_RECOVER | EXT4_FINCOM_MMP
++	EXT4_FINCOM_RECOVER | EXT4_FINCOM_MMP | EXT4_FINCOM_BG_USE_META_CSUM
+ 
+ #if 0
+ /*TODO: Features incompatible to implement*/

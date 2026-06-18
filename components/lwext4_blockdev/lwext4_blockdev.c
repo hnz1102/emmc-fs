@@ -347,6 +347,73 @@ esp_err_t lwext4_format(const char *label)
     return ESP_OK;
 }
 
+/* -------------------------------------------------------------------------
+ * EXT4 superblock diagnostics
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Read the EXT4 superblock and log the magic, incompat, and ro_compat
+ * feature flags.  Highlights any incompat bits that are NOT in
+ * CONFIG_SUPPORTED_FINCOM so the cause of ENOTSUP (errno 134) is visible.
+ *
+ * Superblock starts at byte offset 1024 from the partition start, which is
+ * physical sector (part_offset / SECTOR_SIZE + 2).  Reuses the DMA-capable
+ * s_dma_buf that has already been allocated by lwext4_blockdev_init.
+ */
+static void log_sb_features(void)
+{
+    if (s_card == NULL || s_dma_buf == NULL) return;
+
+    uint64_t sb_lba = s_bdev.part_offset / SECTOR_SIZE + 2;
+    esp_err_t rc = sdmmc_read_sectors(s_card, s_dma_buf, (size_t)sb_lba, 1);
+    if (rc != ESP_OK) {
+        ESP_LOGW(TAG, "sb read at lba=%llu failed: 0x%x",
+                 (unsigned long long)sb_lba, rc);
+        return;
+    }
+
+    uint16_t magic = (uint16_t)s_dma_buf[0x38]
+                   | ((uint16_t)s_dma_buf[0x39] << 8);
+    uint32_t f_inc = (uint32_t)s_dma_buf[0x64]
+                   | ((uint32_t)s_dma_buf[0x65] <<  8)
+                   | ((uint32_t)s_dma_buf[0x66] << 16)
+                   | ((uint32_t)s_dma_buf[0x67] << 24);
+    uint32_t f_roc = (uint32_t)s_dma_buf[0x68]
+                   | ((uint32_t)s_dma_buf[0x69] <<  8)
+                   | ((uint32_t)s_dma_buf[0x6A] << 16)
+                   | ((uint32_t)s_dma_buf[0x6B] << 24);
+
+    ESP_LOGI(TAG, "EXT4 superblock: magic=0x%04X incompat=0x%08lX ro_compat=0x%08lX",
+             magic, (unsigned long)f_inc, (unsigned long)f_roc);
+
+    if (magic != 0xEF53) {
+        ESP_LOGW(TAG, "  magic mismatch — superblock not found at expected location");
+        return;
+    }
+
+    uint32_t unsupported = f_inc & ~(uint32_t)CONFIG_SUPPORTED_FINCOM;
+    if (unsupported) {
+        ESP_LOGW(TAG, "  unsupported incompat bits: 0x%08lX",
+                 (unsigned long)unsupported);
+        if (unsupported & EXT4_FINCOM_COMPRESSION)
+            ESP_LOGW(TAG, "    0x0001 COMPRESSION");
+        if (unsupported & EXT4_FINCOM_JOURNAL_DEV)
+            ESP_LOGW(TAG, "    0x0008 JOURNAL_DEV");
+        if (unsupported & EXT4_FINCOM_EA_INODE)
+            ESP_LOGW(TAG, "    0x0400 EA_INODE");
+        if (unsupported & EXT4_FINCOM_DIRDATA)
+            ESP_LOGW(TAG, "    0x1000 DIRDATA");
+        if (unsupported & EXT4_FINCOM_BG_USE_META_CSUM)
+            ESP_LOGW(TAG, "    0x2000 BG_USE_META_CSUM (csum_seed)");
+        if (unsupported & EXT4_FINCOM_LARGEDIR)
+            ESP_LOGW(TAG, "    0x4000 LARGEDIR");
+        if (unsupported & EXT4_FINCOM_INLINE_DATA)
+            ESP_LOGW(TAG, "    0x8000 INLINE_DATA");
+    } else {
+        ESP_LOGI(TAG, "  all incompat features are in supported/ignored set");
+    }
+}
+
 esp_err_t lwext4_mount(const char *mount_point)
 {
     if (mount_point == NULL) {
@@ -368,6 +435,7 @@ esp_err_t lwext4_mount(const char *mount_point)
     int rc = ext4_mount(DEVICE_NAME, mp_slash, false /* read-write */);
     if (rc != EOK) {
         ESP_LOGE(TAG, "ext4_mount('%s') failed: %d", mp_slash, rc);
+        log_sb_features();  /* diagnose which incompat feature caused ENOTSUP */
         return ESP_FAIL;
     }
 

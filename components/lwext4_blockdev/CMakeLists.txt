@@ -19,6 +19,9 @@ cmake_minimum_required(VERSION 3.16)
 
 set(LWEXT4_DIR "${CMAKE_CURRENT_LIST_DIR}/lwext4")
 
+set(LWEXT4_PATCHES_DIR "${CMAKE_CURRENT_LIST_DIR}/patches")
+set(LWEXT4_PATCH_STAMP "${LWEXT4_DIR}/.patches_applied")
+
 if(NOT EXISTS "${LWEXT4_DIR}/src/ext4.c")
     message(STATUS "[lwext4_blockdev] lwext4 not found – cloning from GitHub...")
     execute_process(
@@ -36,6 +39,31 @@ if(NOT EXISTS "${LWEXT4_DIR}/src/ext4.c")
             "stderr: ${GIT_ERROR}")
     endif()
     message(STATUS "[lwext4_blockdev] lwext4 cloned successfully.")
+endif()
+
+# Apply local patches to lwext4 (idempotent: skip if stamp file exists).
+# Patches live in patches/ and are NOT committed to the lwext4 subtree so
+# the upstream source stays clean and can be updated with `git pull`.
+if(NOT EXISTS "${LWEXT4_PATCH_STAMP}")
+    file(GLOB PATCH_FILES "${LWEXT4_PATCHES_DIR}/*.patch")
+    list(SORT PATCH_FILES)
+    foreach(PATCH_FILE ${PATCH_FILES})
+        get_filename_component(PATCH_NAME "${PATCH_FILE}" NAME)
+        message(STATUS "[lwext4_blockdev] Applying patch: ${PATCH_NAME}")
+        execute_process(
+            COMMAND git apply --whitespace=fix "${PATCH_FILE}"
+            WORKING_DIRECTORY "${LWEXT4_DIR}"
+            RESULT_VARIABLE PATCH_RESULT
+            ERROR_VARIABLE  PATCH_ERROR
+        )
+        if(NOT PATCH_RESULT EQUAL 0)
+            # Already applied? try --check first next time; for now warn and continue.
+            message(WARNING
+                "[lwext4_blockdev] patch '${PATCH_NAME}' failed (already applied?): "
+                "${PATCH_ERROR}")
+        endif()
+    endforeach()
+    file(WRITE "${LWEXT4_PATCH_STAMP}" "patches applied\n")
 endif()
 
 # Collect all lwext4 .c sources

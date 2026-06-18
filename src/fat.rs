@@ -96,7 +96,7 @@ impl FatMount {
         let rc = fat_partition_mount(
             host as *const _,
             slot_config as *const _ as *const c_void,
-            mp.as_ptr(),
+            mp.as_ptr() as *const i8,
             lba_start as u64,
         );
         if rc != ESP_OK as i32 {
@@ -127,7 +127,7 @@ impl Drop for FatMount {
     fn drop(&mut self) {
         unsafe {
             if let Some(ref mp) = self.mount_point_owned {
-                fat_partition_umount(mp.as_ptr());
+                fat_partition_umount(mp.as_ptr() as *const i8);
             } else {
                 esp_vfs_fat_sdmmc_unmount();
             }
